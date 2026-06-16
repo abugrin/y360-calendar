@@ -1,7 +1,7 @@
 export interface EventDateTime {
   date_time?: string;
   date?: string;
-  time_zone: string;
+  time_zone?: string;
 }
 
 export interface EventRepetitionWeekly {
@@ -13,6 +13,13 @@ export interface EventRepetition {
   interval: number;
   weekly?: EventRepetitionWeekly;
 }
+
+export type EventUserRelationType =
+  | 'ORGANIZER'
+  | 'ATTENDEE'
+  | 'OPTIONAL_ATTENDEE'
+  | 'SUBSCRIBER'
+  | 'NONE';
 
 export interface EventRules {
   visibility: string;
@@ -30,19 +37,21 @@ export interface CalendarEvent {
   description?: string;
   location?: string;
   organizer?: string;
-  sequence: number;
+  sequence?: number;
   created_at: string;
   updated_at: string;
-  relation_type: string;
+  relation_type: EventUserRelationType | string;
   rules: EventRules;
   repetition?: EventRepetition;
 }
 
-export interface GetEventsResponse {
+export interface PaginatedResponse<T> {
   limit?: number;
-  items: CalendarEvent[];
+  items: T[];
   iteration_key?: string;
 }
+
+export type GetEventsResponse = PaginatedResponse<CalendarEvent>;
 
 export interface UserToken {
   access_token: string;
@@ -51,18 +60,15 @@ export interface UserToken {
 }
 
 export type ParticipantDecision = 'ACCEPTED' | 'DECLINED' | 'TENTATIVE' | 'NEEDS_ACTION';
+export type ParticipationType = 'ATTENDEE' | 'OPTIONAL';
 
 export interface Participant {
   participation_id: string;
-  participation_type: string;
+  participation_type: ParticipationType | string;
   email: string;
   decision: ParticipantDecision;
   created_at: string;
   updated_at: string;
 }
 
-export interface GetParticipantsResponse {
-  limit: number;
-  items: Participant[];
-  iteration_key?: string;
-}
+export type GetParticipantsResponse = PaginatedResponse<Participant>;

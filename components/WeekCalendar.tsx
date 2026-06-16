@@ -3,6 +3,13 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { CalendarEvent, Participant, ParticipantDecision } from '@/lib/types';
 import { getWeekDays } from '@/lib/calendar-api';
+import {
+  formatEventFullDate,
+  formatEventTime,
+  getEventTimeMinutes,
+  isSameCalendarDay,
+  normalizeRecurrenceId,
+} from '@/lib/datetime';
 
 interface WeekCalendarProps {
   events: CalendarEvent[];
@@ -17,10 +24,6 @@ const TOTAL_MINUTES = (HOUR_END - HOUR_START) * 60;
 
 const DAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница'];
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
-const MONTHS_FULL = [
-  'января', 'февраля', 'марта', 'апреля', 'мая', 'июня',
-  'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря',
-];
 
 const DECISION_LABELS: Record<ParticipantDecision, string> = {
   ACCEPTED: 'Принял',
@@ -38,8 +41,15 @@ const DECISION_COLORS: Record<ParticipantDecision, string> = {
 
 const RELATION_LABELS: Record<string, string> = {
   ORGANIZER: 'Организатор',
-  SUBSCRIBER: 'Участник',
   ATTENDEE: 'Участник',
+  OPTIONAL_ATTENDEE: 'Необязательный участник',
+  SUBSCRIBER: 'Подписчик',
+  NONE: '—',
+};
+
+const PARTICIPATION_TYPE_LABELS: Record<string, string> = {
+  ATTENDEE: 'Участник',
+  OPTIONAL: 'Необязательный',
 };
 
 const FREQ_LABELS: Record<string, string> = {
@@ -62,33 +72,27 @@ const EVENT_COLORS = [
   'bg-amber-100 border-amber-400 text-amber-900',
 ];
 
-function timeToMinutes(timeStr: string): number {
-  const [h, m] = timeStr.split('T')[1]?.split(':').map(Number) ?? [0, 0];
-  return h * 60 + m;
-}
-
 function clamp(value: number, min: number, max: number) {
   return Math.max(min, Math.min(max, value));
 }
 
-function formatTime(dateTimeStr: string): string {
-  const timePart = dateTimeStr.split('T')[1];
-  const [h, m] = timePart.split(':');
-  return `${h}:${m}`;
+function isAllDayEvent(event: CalendarEvent): boolean {
+  return Boolean(event.start.date && !event.start.date_time);
 }
 
-function formatFullDate(dateTimeStr: string): string {
-  const [datePart] = dateTimeStr.split('T');
-  const [year, month, day] = datePart.split('-').map(Number);
-  return `${day} ${MONTHS_FULL[month - 1]} ${year}`;
-}
+function getEventMinutes(event: CalendarEvent): { startMin: number; endMin: number } | null {
+  if (isAllDayEvent(event)) {
+    return {
+      startMin: HOUR_START * 60,
+      endMin: (HOUR_START + 2) * 60,
+    };
+  }
 
-function isSameDay(date: Date, dateTimeStr: string): boolean {
-  const evDate = dateTimeStr.split('T')[0];
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return evDate === `${year}-${month}-${day}`;
+  const startMin = getEventTimeMinutes(event.start.date_time);
+  const endMin = getEventTimeMinutes(event.end.date_time);
+  if (startMin === null || endMin === null) return null;
+
+  return { startMin, endMin };
 }
 
 function isToday(date: Date): boolean {
@@ -112,11 +116,14 @@ interface PositionedEvent {
 function layoutDayEvents(events: CalendarEvent[]): PositionedEvent[] {
   const startMinBase = HOUR_START * 60;
 
-  const items = events.map((ev, idx) => {
-    const startMin = clamp(timeToMinutes(ev.start.date_time!), HOUR_START * 60, HOUR_END * 60);
-    const endMin = clamp(timeToMinutes(ev.end.date_time!), HOUR_START * 60, HOUR_END * 60);
+  const items = events.flatMap((ev, idx) => {
+    const minutes = getEventMinutes(ev);
+    if (!minutes) return [];
+
+    const startMin = clamp(minutes.startMin, HOUR_START * 60, HOUR_END * 60);
+    const endMin = clamp(minutes.endMin, HOUR_START * 60, HOUR_END * 60);
     const duration = Math.max(endMin - startMin, 15);
-    return {
+    return [{
       event: ev,
       startMin,
       endMin: startMin + duration,
@@ -125,7 +132,7 @@ function layoutDayEvents(events: CalendarEvent[]): PositionedEvent[] {
       colorClass: EVENT_COLORS[idx % EVENT_COLORS.length],
       column: 0,
       totalColumns: 1,
-    };
+    }];
   });
 
   for (let i = 0; i < items.length; i++) {
@@ -175,11 +182,7 @@ function EventModal({ event, email, onClose }: EventModalProps) {
 
     const params = new URLSearchParams({ email, event_id: event.event_id });
     if (event.recurrence_id) {
-      // API returns e.g. "2026-06-02T08:00Z"; endpoint expects "YYYY-MM-DDTHH:mm:ss"
-      const rid = event.recurrence_id
-        .replace(/Z$/, '')                                         // strip trailing Z
-        .replace(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})$/, '$1:00'); // add :00 seconds if absent
-      params.set('recurrence_id', rid);
+      params.set('recurrence_id', normalizeRecurrenceId(event.recurrence_id));
     }
 
     fetch(`/api/participants?${params.toString()}`)
@@ -194,9 +197,10 @@ function EventModal({ event, email, onClose }: EventModalProps) {
       .finally(() => setParticipantsLoading(false));
   }, [event.event_id, event.recurrence_id, email]);
 
-  const startDate = event.start.date_time ? formatFullDate(event.start.date_time) : '—';
-  const startTime = event.start.date_time ? formatTime(event.start.date_time) : '—';
-  const endTime = event.end.date_time ? formatTime(event.end.date_time) : '—';
+  const startDate = formatEventFullDate(event.start);
+  const startTime = isAllDayEvent(event) ? 'Весь день' : formatEventTime(event.start.date_time);
+  const endTime = isAllDayEvent(event) ? '' : formatEventTime(event.end.date_time);
+  const timeLabel = endTime ? `${startTime}–${endTime}` : startTime;
 
   const repetitionLabel = (() => {
     if (!event.repetition) return null;
@@ -251,7 +255,7 @@ function EventModal({ event, email, onClose }: EventModalProps) {
               </svg>
             }
             label="Дата и время"
-            value={`${startDate}, ${startTime}–${endTime}`}
+            value={`${startDate}, ${timeLabel}`}
           />
 
           {/* Location */}
@@ -344,7 +348,12 @@ function EventModal({ event, email, onClose }: EventModalProps) {
               <ul className="space-y-1.5 max-h-48 overflow-y-auto pr-1">
                 {participants.map((p) => (
                   <li key={p.participation_id} className="flex items-center justify-between gap-2">
-                    <span className="text-sm text-slate-700 truncate">{p.email}</span>
+                    <div className="min-w-0">
+                      <span className="text-sm text-slate-700 truncate block">{p.email}</span>
+                      <span className="text-xs text-slate-400">
+                        {PARTICIPATION_TYPE_LABELS[p.participation_type] ?? p.participation_type}
+                      </span>
+                    </div>
                     <span
                       className={`flex-shrink-0 rounded-full px-2 py-0.5 text-xs font-medium ${
                         DECISION_COLORS[p.decision] ?? 'bg-slate-100 text-slate-600'
@@ -441,9 +450,7 @@ export default function WeekCalendar({ events, weekStart, email }: WeekCalendarP
           {/* Day columns */}
           {days.map((day, colIdx) => {
             const today = isToday(day);
-            const dayEvents = events.filter(
-              (ev) => ev.start.date_time && isSameDay(day, ev.start.date_time)
-            );
+            const dayEvents = events.filter((ev) => isSameCalendarDay(day, ev.start));
             const positioned = layoutDayEvents(dayEvents);
 
             return (
@@ -486,7 +493,7 @@ export default function WeekCalendar({ events, weekStart, email }: WeekCalendarP
                       </div>
                       {heightPct > 3 && (
                         <div className="text-xs opacity-75 leading-tight truncate">
-                          {formatTime(event.start.date_time!)}–{formatTime(event.end.date_time!)}
+                        {isAllDayEvent(event) ? 'Весь день' : `${formatEventTime(event.start.date_time)}–${formatEventTime(event.end.date_time)}`}
                         </div>
                       )}
                       {heightPct > 6 && event.location && (

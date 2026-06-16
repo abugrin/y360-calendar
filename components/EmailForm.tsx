@@ -3,6 +3,7 @@
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useState, useTransition } from 'react';
 import { shiftWeek, getWeekRange } from '@/lib/calendar-api';
+import { addDaysToDateStr } from '@/lib/datetime';
 
 interface EmailFormProps {
   currentEmail: string;
@@ -16,9 +17,10 @@ const MONTHS_RU = [
 ];
 
 function formatWeekLabel(weekStart: string): string {
-  const { fromDate, toDate } = getWeekRange(weekStart);
-  const from = new Date(fromDate + 'T00:00:00');
-  const to = new Date(toDate + 'T00:00:00');
+  const { weekStart: mondayStr } = getWeekRange(weekStart);
+  const from = new Date(`${mondayStr}T00:00:00`);
+  const fridayStr = addDaysToDateStr(mondayStr, 4);
+  const to = new Date(`${fridayStr}T00:00:00`);
   if (from.getMonth() === to.getMonth()) {
     return `${from.getDate()}–${to.getDate()} ${MONTHS_RU[from.getMonth()]} ${from.getFullYear()}`;
   }

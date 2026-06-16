@@ -2,7 +2,7 @@ import { Suspense } from 'react';
 import EmailForm from '@/components/EmailForm';
 import WeekCalendar from '@/components/WeekCalendar';
 import { getUserToken } from '@/lib/yandex-auth';
-import { getWeekEvents, getWeekRange } from '@/lib/calendar-api';
+import { getWeekEvents } from '@/lib/calendar-api';
 import type { CalendarEvent } from '@/lib/types';
 
 interface PageProps {
@@ -72,8 +72,6 @@ export default async function HomePage({ searchParams }: PageProps) {
   const params = await searchParams;
   const email = params.email?.trim() ?? '';
   const weekStart = params.weekStart?.trim() || getMondayOfCurrentWeek();
-
-  const { fromDate, toDate } = getWeekRange(weekStart);
 
   return (
     <div className="flex min-h-screen flex-col">
