@@ -1,134 +1,131 @@
-/**
- * Centralized API fetch utility with:
- *  - Per-email token bucket rate limiter (default 5 RPS)
- *  - Automatic retry on HTTP 429 with Retry-After header support
- */
+import 'server-only';
 
 const RPS_LIMIT = 5;
 const MAX_RETRIES = 3;
+const REQUEST_TIMEOUT_MS = 30_000;
+const MAX_BUCKETS = 1_000;
+const MAX_PENDING_PER_BUCKET = 100;
+const IDLE_BUCKET_TTL_MS = 10 * 60_000;
 
-// ─── Token Bucket ─────────────────────────────────────────────────────────────
-
-class TokenBucket {
-  private tokens: number;
-  private lastRefill: number;
-
-  constructor(
-    private readonly maxTokens: number,
-    private readonly tokensPerSecond: number,
-  ) {
-    this.tokens = maxTokens;
-    this.lastRefill = Date.now();
-  }
-
-  /** Refill tokens proportional to elapsed time. */
-  private refill(): void {
-    const now = Date.now();
-    const elapsed = now - this.lastRefill;
-    this.tokens = Math.min(
-      this.maxTokens,
-      this.tokens + (elapsed * this.tokensPerSecond) / 1000,
-    );
-    this.lastRefill = now;
-  }
-
-  /**
-   * Acquire one token, waiting if the bucket is empty.
-   * Returns the number of milliseconds waited.
-   */
-  async acquire(): Promise<void> {
-    this.refill();
-    if (this.tokens >= 1) {
-      this.tokens -= 1;
-      return;
-    }
-    // Calculate exact wait time until 1 token is available
-    const waitMs = Math.ceil(((1 - this.tokens) / this.tokensPerSecond) * 1000);
-    await sleep(waitMs);
-    this.refill();
-    this.tokens -= 1;
+/** Only errors constructed here may be shown to a browser. */
+export class ApiError extends Error {
+  constructor(message: string, public readonly status = 502) {
+    super(message);
+    this.name = 'ApiError';
   }
 }
 
-/** Module-level buckets — one per email, shared across all requests in the process. */
-const buckets = new Map<string, TokenBucket>();
+export function getSafeErrorMessage(
+  error: unknown,
+  fallback = 'Не удалось загрузить данные. Попробуйте позже.',
+): string {
+  return error instanceof ApiError ? error.message : fallback;
+}
 
-function getBucket(email: string): TokenBucket {
-  let bucket = buckets.get(email);
+interface Bucket {
+  tokens: number;
+  updatedAt: number;
+  active: number;
+}
+
+const buckets = new Map<string, Bucket>();
+
+function getBucket(key: string): Bucket {
+  const now = Date.now();
+  for (const [storedKey, bucket] of buckets) {
+    if (!bucket.active && now - bucket.updatedAt >= IDLE_BUCKET_TTL_MS) {
+      buckets.delete(storedKey);
+    }
+  }
+
+  let bucket = buckets.get(key);
   if (!bucket) {
-    bucket = new TokenBucket(RPS_LIMIT, RPS_LIMIT);
-    buckets.set(email, bucket);
+    if (buckets.size >= MAX_BUCKETS) {
+      // Eviction must not reset an active or partially depleted limiter.
+      const idle = [...buckets].find(([, value]) => value.active === 0 &&
+        value.tokens + Math.max(0, now - value.updatedAt) * RPS_LIMIT / 1000 >= RPS_LIMIT);
+      if (idle) buckets.delete(idle[0]);
+      else throw new ApiError('Слишком много одновременных запросов. Попробуйте позже.', 503);
+    }
+    bucket = { tokens: RPS_LIMIT, updatedAt: now, active: 0 };
+    buckets.set(key, bucket);
+  }
+  if (bucket.active >= MAX_PENDING_PER_BUCKET) {
+    throw new ApiError('Слишком много одновременных запросов. Попробуйте позже.', 429);
   }
   return bucket;
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  signal.throwIfAborted();
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
-/**
- * Parse the Retry-After header value.
- * Accepts either a delay in seconds (number) or an HTTP-date string.
- * Returns milliseconds to wait.
- */
-function parseRetryAfterMs(header: string | null): number {
+async function acquire(bucket: Bucket, signal: AbortSignal): Promise<void> {
+  const now = Date.now();
+  bucket.tokens = Math.min(RPS_LIMIT, bucket.tokens + Math.max(0, now - bucket.updatedAt) * RPS_LIMIT / 1000);
+  bucket.updatedAt = now;
+  // Reserve before awaiting. Negative tokens represent distinct queued slots.
+  // Concurrent waiters must not all wake up and spend the same token.
+  bucket.tokens -= 1;
+  await sleep(Math.max(0, Math.ceil(-bucket.tokens * 1000 / RPS_LIMIT)), signal);
+}
+
+export function parseRetryAfterMs(header: string | null, now = Date.now()): number {
   if (!header) return 0;
-  const seconds = parseFloat(header);
-  if (!isNaN(seconds)) return Math.ceil(seconds * 1000);
-  const date = new Date(header);
-  if (!isNaN(date.getTime())) return Math.max(0, date.getTime() - Date.now());
-  return 0;
+  const value = header.trim();
+  if (/^\d+(?:\.\d+)?$/.test(value)) {
+    const milliseconds = Number(value) * 1000;
+    return Number.isFinite(milliseconds) ? Math.ceil(milliseconds) : 0;
+  }
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? Math.max(0, timestamp - now) : 0;
 }
 
-// ─── Public API ───────────────────────────────────────────────────────────────
-
-/**
- * Rate-limited fetch with automatic retry on 429.
- *
- * @param email     Used as the rate-limiter key.
- * @param url       Target URL.
- * @param options   Standard RequestInit options.
- * @param retries   Maximum number of retry attempts on 429 (default 3).
- */
+/** A bounded per-identity limiter and deadline shared by queueing and 429 retries. */
 export async function apiFetch(
   email: string,
   url: string,
   options: RequestInit = {},
   retries = MAX_RETRIES,
 ): Promise<Response> {
-  const bucket = getBucket(email);
+  const bucket = getBucket(email.trim().toLowerCase());
+  bucket.active += 1;
+  const deadline = Date.now() + REQUEST_TIMEOUT_MS;
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout;
+  const retryLimit = Number.isInteger(retries) ? Math.max(0, Math.min(retries, MAX_RETRIES)) : MAX_RETRIES;
 
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    // Acquire a rate-limit token before every attempt
-    await bucket.acquire();
+  try {
+    for (let attempt = 0; ; attempt++) {
+      await acquire(bucket, signal);
+      signal.throwIfAborted();
+      const response = await fetch(url, { ...options, signal });
+      if (response.status !== 429 || attempt >= retryLimit) return response;
 
-    const response = await fetch(url, options);
-
-    if (response.status !== 429) {
-      return response;
+      const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'));
+      const delay = retryAfterMs || 2 ** attempt * 1000;
+      // Do not ignore a long Retry-After, or retain the connection while waiting.
+      if (delay >= deadline - Date.now()) return response;
+      await response.body?.cancel();
+      await sleep(delay, signal);
     }
-
-    if (attempt === retries) {
-      // Return the 429 response to the caller on the last attempt
-      return response;
-    }
-
-    // Determine how long to wait before retrying
-    const retryAfterMs = parseRetryAfterMs(response.headers.get('Retry-After'));
-    const backoffMs = retryAfterMs > 0
-      ? retryAfterMs
-      : Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-
-    console.warn(
-      `[apiFetch] 429 for ${email}, attempt ${attempt + 1}/${retries}. ` +
-      `Waiting ${backoffMs}ms before retry.`,
-    );
-
-    await sleep(backoffMs);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    if (signal.aborted) throw new ApiError('Превышено время ожидания ответа API.', 504);
+    throw new ApiError('Не удалось связаться с API. Попробуйте позже.', 502);
+  } finally {
+    bucket.active -= 1;
   }
-
-  // Should be unreachable, but TypeScript needs it
-  throw new Error('apiFetch: unexpected state after retry loop');
 }

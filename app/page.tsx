@@ -4,21 +4,12 @@ import WeekCalendar from '@/components/WeekCalendar';
 import { getUserToken } from '@/lib/yandex-auth';
 import { getWeekEvents } from '@/lib/calendar-api';
 import type { CalendarEvent } from '@/lib/types';
+import { getWeekRange } from '@/lib/week';
+import { isValidDateOnly, isValidEmail } from '@/lib/validation';
+import { getSafeErrorMessage } from '@/lib/api-client';
 
 interface PageProps {
-  searchParams: Promise<{ email?: string; weekStart?: string }>;
-}
-
-function getMondayOfCurrentWeek(): string {
-  const now = new Date();
-  const day = now.getDay();
-  const diff = day === 0 ? -6 : 1 - day;
-  const monday = new Date(now);
-  monday.setDate(now.getDate() + diff);
-  const y = monday.getFullYear();
-  const m = String(monday.getMonth() + 1).padStart(2, '0');
-  const d = String(monday.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  searchParams: Promise<{ email?: string | string[]; weekStart?: string | string[] }>;
 }
 
 async function CalendarSection({
@@ -35,7 +26,7 @@ async function CalendarSection({
     const tokenData = await getUserToken(email);
     events = await getWeekEvents(email, tokenData.access_token, weekStart);
   } catch (err) {
-    errorMessage = err instanceof Error ? err.message : 'Неизвестная ошибка';
+    errorMessage = getSafeErrorMessage(err);
   }
 
   if (errorMessage) {
@@ -70,8 +61,11 @@ function pluralEvents(n: number): string {
 
 export default async function HomePage({ searchParams }: PageProps) {
   const params = await searchParams;
-  const email = params.email?.trim() ?? '';
-  const weekStart = params.weekStart?.trim() || getMondayOfCurrentWeek();
+  const email = typeof params.email === 'string' ? params.email.trim() : '';
+  const requestedWeek = typeof params.weekStart === 'string' ? params.weekStart.trim() : '';
+  const invalidInput = (params.email !== undefined && (typeof params.email !== 'string' || (!!email && !isValidEmail(email)))) ||
+    (params.weekStart !== undefined && (typeof params.weekStart !== 'string' || (!!requestedWeek && !isValidDateOnly(requestedWeek))));
+  const weekStart = getWeekRange(isValidDateOnly(requestedWeek) ? requestedWeek : undefined).weekStart;
 
   return (
     <div className="flex min-h-screen flex-col">
@@ -105,11 +99,16 @@ export default async function HomePage({ searchParams }: PageProps) {
       {/* Main content */}
       <main className="flex flex-1 flex-col gap-5 mx-auto w-full max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <Suspense>
-          <EmailForm currentEmail={email} currentWeekStart={weekStart} />
+          <EmailForm key={email} currentEmail={email} currentWeekStart={weekStart} />
         </Suspense>
 
-        {email ? (
+        {invalidInput ? (
+          <p role="alert" className="rounded-xl border border-red-200 bg-red-50 p-6 text-red-700">
+            Проверьте email и дату недели в адресе страницы (формат даты: ГГГГ-ММ-ДД).
+          </p>
+        ) : email ? (
           <Suspense
+            key={`${email}:${weekStart}`}
             fallback={
               <div className="flex flex-1 items-center justify-center py-24 text-slate-400">
                 <div className="flex flex-col items-center gap-3">
@@ -135,9 +134,9 @@ export default async function HomePage({ searchParams }: PageProps) {
               </svg>
             </div>
             <div>
-              <p className="text-lg font-medium text-slate-700">Введите email сотрудника</p>
+              <p className="text-lg font-medium text-slate-700">Найдите сотрудника</p>
               <p className="mt-1 text-sm text-slate-500">
-                Укажите корпоративный email Яндекс 360, чтобы загрузить календарь
+                Введите имя, фамилию, отображаемое имя или корпоративный email Яндекс 360
               </p>
             </div>
           </div>

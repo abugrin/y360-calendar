@@ -1,132 +1,66 @@
 # y360-calendar
 
-Веб-приложение для просмотра календаря Яндекс 360 по email пользователя (недельный вид Пн–Пт).
+> Данное приложение предоставляется как есть и является примером работы с API
 
-## Требования
+Календарь Яндекс 360 с недельным видом Пн–Пт, поиском сотрудников и просмотром участников событий.
 
-- Node.js 18+
-- Сервисное OAuth-приложение Яндекс 360 с правами Calendar API и механизмом token exchange по email
-- Для работы приложения достаточно scope **`calendar:events.read`** (просмотр событий и участников). Альтернатива — **`calendar:read_all`**, если нужен доступ ко всем данным Календаря
-
-## Установка Node.js
-
-Проверьте, установлен ли Node.js:
-
-```bash
-node -v
-npm -v
-```
-
-Если команды не найдены, установите Node.js одним из способов:
-
-**macOS (Homebrew):**
-
-```bash
-brew install node
-```
-
-**Linux (NodeSource, пример для Ubuntu/Debian):**
-
-```bash
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt-get install -y nodejs
-```
-
-**Windows:** скачайте LTS-установщик с [nodejs.org](https://nodejs.org/) и установите его.
-
-**Через nvm (macOS / Linux):**
-
-```bash
-curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-nvm install 20
-nvm use 20
-```
-
-## Настройка сервисного приложения
-
-Приложению нужны `YANDEX_CLIENT_ID` и `YANDEX_CLIENT_SECRET` **сервисного** OAuth-приложения организации.
-
-Подробная инструкция: [Сервисные приложения — Яндекс 360 для бизнеса](https://yandex.ru/support/yandex-360/business/admin/ru/security-service-applications)
-
-Кратко:
-
-1. Войдите в аккаунт **владельца организации** Яндекс 360.
-2. Создайте OAuth-приложение на [oauth.yandex.ru](https://oauth.yandex.ru):
-   - платформа: **Веб-сервисы**;
-   - в **Доступ к данным** укажите scope для Calendar API (см. таблицу ниже);
-   - сохраните **ClientID** и **Client secret**.
-3. Активируйте сервисные приложения в организации и **зарегистрируйте** созданное OAuth-приложение как сервисное через API 360 (`POST .../service_applications`). При регистрации укажите те же scope, что и в OAuth-приложении.
-4. Убедитесь, что для `client_id` вашего приложения у ТАМа открыт доступ к **Calendar Public API** (см. [`doc/calendar_api_ru (3).md`](doc/calendar_api_ru%20(3).md)).
-
-### Scope Calendar API
-
-| Scope | Назначение |
-|-------|------------|
-| `calendar:read_all` | Просмотр любых данных в Календаре |
-| `calendar:write_all` | Изменение любых данных в Календаре |
-| `calendar:events.read` | Просмотр событий в Календаре |
-| `calendar:events.write` | Создание, изменение и удаление событий в Календаре |
-| `calendar:calendars.read` | Просмотр списка календарей и их настроек |
-| `calendar:calendars.write` | Создание, изменение и удаление календарей, управление доступом к ним |
-| `calendar:free_busy.read` | Просмотр занятости пользователей и переговорок в Календаре |
-| `calendar:resources.read` | Просмотр доступных офисов и переговорок организации в Календаре |
-| `calendar:my_settings.read` | Просмотр пользовательских настроек Календаря |
-| `calendar:my_settings.write` | Изменение пользовательских настроек Календаря |
-
-Для **y360-calendar** (только чтение событий и участников) укажите минимум:
-
-```
-calendar:events.read
-```
-
-Если планируете расширять функциональность, можно сразу выдать более широкий scope — например `calendar:read_all`.
-
-Приложение получает **временный OAuth-токен пользователя** (срок действия — 1 час) через token exchange по email:
-
-```
-POST https://oauth.yandex.ru/token
-grant_type=urn:ietf:params:oauth:grant-type:token-exchange
-subject_token=<user_email>
-subject_token_type=urn:yandex:params:oauth:token-type:email
-```
-
-## Установка проекта
-
-```bash
-git clone <repo-url>
-cd y360-calendar
-npm install
-cp .env.example .env.local
-```
-
-Заполните `.env.local`:
-
-```
-YANDEX_CLIENT_ID=ваш_client_id
-YANDEX_CLIENT_SECRET=ваш_client_secret
-```
 
 ## Запуск
 
-**Разработка:**
+Нужны Node.js **24.13+** и npm. Версии зависимостей зафиксированы в `package-lock.json`.
 
 ```bash
+npm ci
+cp .env.example .env.local
+# Заполните .env.local, затем:
 npm run dev
 ```
 
-Приложение: http://localhost:3000
+Next.js читает именно `.env.local`.
 
-**Продакшен:**
+Откройте http://127.0.0.1:3000. Для production:
 
 ```bash
-npm run build
+npm run check
 npm start
 ```
 
-## Использование
+## Настройки
 
-1. Откройте приложение в браузере.
-2. Введите корпоративный email пользователя Яндекс 360.
-3. Нажмите «Показать» — загрузится календарь на текущую неделю (Пн–Пт).
-4. Клик по событию открывает детали и список участников.
 
+| Переменная | Назначение |
+|---|---|
+| `YANDEX_CLIENT_ID` | Client ID сервисного OAuth-приложения организации |
+| `YANDEX_CLIENT_SECRET` | Секрет того же приложения для token exchange по email |
+| `TOKEN` | OAuth-токен доступа к справочнику с разрешением `directory:read_users` |
+| `ORG_ID` | Числовой идентификатор организации для справочника |
+
+Calendar API должен быть доступен сервисному приложению. Для чтения событий и участников используется разрешение `calendar:events.read`; конфигурация с `calendar:read_all` тоже подходит. Регистрация сервисного приложения описана в [документации Яндекс 360](https://yandex.ru/support/yandex-360/business/admin/ru/security-service-applications).
+
+## Поиск сотрудников
+
+1. Введите хотя бы два символа email, имени, фамилии, отчества или отображаемого имени.
+2. Выберите сотрудника мышью либо стрелками и Enter — откроется его календарь.
+3. Можно сразу ввести полный email и нажать «Показать», в том числе при недоступном справочнике.
+4. Кнопками ‹/› переключайте недели. Нажмите на событие для просмотра деталей и участников.
+
+Поиск не зависит от регистра, считает `е` и `ё` эквивалентными и ищет все слова независимо от порядка. Сервер возвращает не более 20 совпадений и их общее количество; уточните запрос для большого числа совпадений.
+
+
+## Проверки
+
+```bash
+npm run lint
+npm run typecheck
+npm test
+npm run build
+# Все перечисленные проверки:
+npm run check
+# Read-only проверка живых API с .env.local:
+npm run test:live
+# UI-регрессии с синтетическим справочником (после сборки):
+npx playwright install chromium
+npm run test:e2e
+# Или с уже установленным Google Chrome:
+PLAYWRIGHT_CHANNEL=chrome npm run test:e2e
+```

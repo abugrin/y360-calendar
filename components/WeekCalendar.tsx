@@ -1,26 +1,23 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useId, useRef } from 'react';
 import type { CalendarEvent, Participant, ParticipantDecision } from '@/lib/types';
-import { getWeekDays } from '@/lib/calendar-api';
+import { getWeekDays } from '@/lib/week';
 import {
+  addDaysToDateStr,
+  formatDateOnly,
   formatEventFullDate,
   formatEventTime,
-  getEventTimeMinutes,
-  isSameCalendarDay,
+  getEventDateKey,
   normalizeRecurrenceId,
 } from '@/lib/datetime';
+import { getVisibleHourRange, isAllDayEvent, isAllDayEventOnDate, layoutDayEvents } from '@/lib/calendar-layout';
 
 interface WeekCalendarProps {
   events: CalendarEvent[];
   weekStart: string;
   email: string;
 }
-
-const HOUR_START = 8;
-const HOUR_END = 21;
-const HOURS = Array.from({ length: HOUR_END - HOUR_START + 1 }, (_, i) => HOUR_START + i);
-const TOTAL_MINUTES = (HOUR_END - HOUR_START) * 60;
 
 const DAY_NAMES = ['Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница'];
 const MONTHS_SHORT = ['янв', 'фев', 'мар', 'апр', 'май', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
@@ -72,88 +69,8 @@ const EVENT_COLORS = [
   'bg-amber-100 border-amber-400 text-amber-900',
 ];
 
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function isAllDayEvent(event: CalendarEvent): boolean {
-  return Boolean(event.start.date && !event.start.date_time);
-}
-
-function getEventMinutes(event: CalendarEvent): { startMin: number; endMin: number } | null {
-  if (isAllDayEvent(event)) {
-    return {
-      startMin: HOUR_START * 60,
-      endMin: (HOUR_START + 2) * 60,
-    };
-  }
-
-  const startMin = getEventTimeMinutes(event.start.date_time);
-  const endMin = getEventTimeMinutes(event.end.date_time);
-  if (startMin === null || endMin === null) return null;
-
-  return { startMin, endMin };
-}
-
 function isToday(date: Date): boolean {
-  const now = new Date();
-  return (
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate()
-  );
-}
-
-interface PositionedEvent {
-  event: CalendarEvent;
-  topPct: number;
-  heightPct: number;
-  colorClass: string;
-  column: number;
-  totalColumns: number;
-}
-
-function layoutDayEvents(events: CalendarEvent[]): PositionedEvent[] {
-  const startMinBase = HOUR_START * 60;
-
-  const items = events.flatMap((ev, idx) => {
-    const minutes = getEventMinutes(ev);
-    if (!minutes) return [];
-
-    const startMin = clamp(minutes.startMin, HOUR_START * 60, HOUR_END * 60);
-    const endMin = clamp(minutes.endMin, HOUR_START * 60, HOUR_END * 60);
-    const duration = Math.max(endMin - startMin, 15);
-    return [{
-      event: ev,
-      startMin,
-      endMin: startMin + duration,
-      topPct: ((startMin - startMinBase) / TOTAL_MINUTES) * 100,
-      heightPct: (duration / TOTAL_MINUTES) * 100,
-      colorClass: EVENT_COLORS[idx % EVENT_COLORS.length],
-      column: 0,
-      totalColumns: 1,
-    }];
-  });
-
-  for (let i = 0; i < items.length; i++) {
-    const overlapping = items.filter(
-      (other, j) => j !== i && other.startMin < items[i].endMin && other.endMin > items[i].startMin
-    );
-    if (overlapping.length === 0) {
-      items[i].column = 0;
-      items[i].totalColumns = 1;
-    } else {
-      const usedColumns = new Set(overlapping.map((o) => o.column));
-      let col = 0;
-      while (usedColumns.has(col)) col++;
-      items[i].column = col;
-      const groupSize = overlapping.length + 1;
-      items[i].totalColumns = groupSize;
-      overlapping.forEach((o) => (o.totalColumns = groupSize));
-    }
-  }
-
-  return items;
+  return formatDateOnly(date) === getEventDateKey({ date_time: new Date().toISOString() });
 }
 
 // ─── Event Detail Modal ───────────────────────────────────────────────────────
@@ -165,42 +82,56 @@ interface EventModalProps {
 }
 
 function EventModal({ event, email, onClose }: EventModalProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [participantsLoading, setParticipantsLoading] = useState(true);
   const [participantsError, setParticipantsError] = useState<string | null>(null);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
-  }, [onClose]);
+    const dialog = dialogRef.current;
+    const previousFocus = document.activeElement;
+    dialog?.showModal();
+    return () => {
+      dialog?.close();
+      if (previousFocus instanceof HTMLElement) previousFocus.focus();
+    };
+  }, []);
 
   useEffect(() => {
-    setParticipants([]);
-    setParticipantsLoading(true);
-    setParticipantsError(null);
-
+    const controller = new AbortController();
     const params = new URLSearchParams({ email, event_id: event.event_id });
     if (event.recurrence_id) {
       params.set('recurrence_id', normalizeRecurrenceId(event.recurrence_id));
     }
 
-    fetch(`/api/participants?${params.toString()}`)
-      .then((res) => res.json())
+    fetch(`/api/participants?${params.toString()}`, { signal: controller.signal, cache: 'no-store' })
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`Ошибка загрузки участников (${res.status})`);
+        return res.json() as Promise<{ items: Participant[] }>;
+      })
       .then((data) => {
-        if (data.error) throw new Error(data.error);
-        setParticipants(data.items ?? []);
+        if (!controller.signal.aborted) setParticipants(data.items ?? []);
       })
-      .catch((err: unknown) => {
-        setParticipantsError(err instanceof Error ? err.message : 'Ошибка загрузки участников');
+      .catch(() => {
+        if (!controller.signal.aborted) setParticipantsError('Не удалось загрузить участников. Попробуй открыть встречу снова.');
       })
-      .finally(() => setParticipantsLoading(false));
+      .finally(() => {
+        if (!controller.signal.aborted) setParticipantsLoading(false);
+      });
+    return () => controller.abort();
   }, [event.event_id, event.recurrence_id, email]);
 
   const startDate = formatEventFullDate(event.start);
   const startTime = isAllDayEvent(event) ? 'Весь день' : formatEventTime(event.start.date_time);
   const endTime = isAllDayEvent(event) ? '' : formatEventTime(event.end.date_time);
   const timeLabel = endTime ? `${startTime}–${endTime}` : startTime;
+  const endDate = isAllDayEvent(event) && event.end.date
+    ? formatEventFullDate({ date: addDaysToDateStr(event.end.date, -1) })
+    : formatEventFullDate(event.end);
+  const fullTimeLabel = endDate !== startDate
+    ? (isAllDayEvent(event) ? `${startDate} – ${endDate}, весь день` : `${startDate}, ${startTime} – ${endDate}, ${endTime}`)
+    : `${startDate}, ${timeLabel}`;
 
   const repetitionLabel = (() => {
     if (!event.repetition) return null;
@@ -212,26 +143,26 @@ function EventModal({ event, email, onClose }: EventModalProps) {
   })();
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4"
-      role="dialog"
+    <dialog
+      ref={dialogRef}
+      className="fixed inset-0 m-auto max-h-[85dvh] w-[calc(100%-2rem)] max-w-md overflow-y-auto rounded-2xl bg-white p-0 shadow-2xl ring-1 ring-slate-200 backdrop:bg-black/40 backdrop:backdrop-blur-sm"
       aria-modal="true"
-      aria-label={event.summary}
+      aria-labelledby={titleId}
+      onCancel={(e) => { e.preventDefault(); onClose(); }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget) return;
+        const rect = e.currentTarget.getBoundingClientRect();
+        if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) onClose();
+      }}
     >
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/40 backdrop-blur-sm"
-        onClick={onClose}
-      />
-
       {/* Panel */}
-      <div className="relative z-10 w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200 overflow-hidden">
+      <div>
         {/* Color accent strip */}
         <div className="h-1.5 bg-indigo-600" />
 
         {/* Header */}
         <div className="flex items-start justify-between gap-4 px-6 pt-5 pb-4">
-          <h2 className="text-lg font-semibold text-slate-900 leading-snug">
+          <h2 id={titleId} className="text-lg font-semibold text-slate-900 leading-snug">
             {event.summary}
           </h2>
           <button
@@ -255,7 +186,7 @@ function EventModal({ event, email, onClose }: EventModalProps) {
               </svg>
             }
             label="Дата и время"
-            value={`${startDate}, ${timeLabel}`}
+            value={fullTimeLabel}
           />
 
           {/* Location */}
@@ -368,7 +299,7 @@ function EventModal({ event, email, onClose }: EventModalProps) {
           </div>
         </div>
       </div>
-    </div>
+    </dialog>
   );
 }
 
@@ -396,12 +327,18 @@ function DetailRow({
 
 export default function WeekCalendar({ events, weekStart, email }: WeekCalendarProps) {
   const days = getWeekDays(weekStart);
+  const dateKeys = days.map(formatDateOnly);
+  const range = getVisibleHourRange(events, dateKeys);
+  const hourCount = range.end - range.start;
+  const hours = Array.from({ length: hourCount + 1 }, (_, i) => range.start + i);
+  const allDayEvents = dateKeys.map((day) => events.filter((event) => isAllDayEventOnDate(event, day)));
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
   const closeModal = useCallback(() => setSelectedEvent(null), []);
 
   return (
     <>
       <div className="flex-1 overflow-auto rounded-xl border border-slate-200 bg-white shadow-sm">
+        <div className="min-w-[760px]">
         {/* Header row */}
         <div className="grid border-b border-slate-200" style={{ gridTemplateColumns: '56px repeat(5, 1fr)' }}>
           <div className="border-r border-slate-200" />
@@ -430,73 +367,92 @@ export default function WeekCalendar({ events, weekStart, email }: WeekCalendarP
           })}
         </div>
 
-        {/* Grid body */}
-        <div className="flex">
-          {/* Time labels */}
-          <div className="flex-shrink-0 w-14 border-r border-slate-200">
-            {HOURS.map((h) => (
-              <div
-                key={h}
-                className="relative border-b border-slate-100"
-                style={{ height: `${100 / HOURS.length}%`, minHeight: '52px' }}
-              >
-                <span className="absolute -top-2.5 right-2 text-xs text-slate-400 select-none">
-                  {String(h).padStart(2, '0')}:00
-                </span>
+        {allDayEvents.some((items) => items.length > 0) && (
+          <div className="grid border-b border-slate-200" style={{ gridTemplateColumns: '56px repeat(5, minmax(0, 1fr))' }}>
+            <div className="border-r border-slate-200 px-1 py-2 text-center text-[10px] text-slate-500">Весь день</div>
+            {allDayEvents.map((items, index) => (
+              <div key={dateKeys[index]} className="space-y-1 border-r border-slate-200 p-1 last:border-r-0">
+                {items.map((event) => (
+                  <button
+                    key={`${event.event_id}-${event.recurrence_id ?? event.start.date}`}
+                    type="button"
+                    onClick={() => setSelectedEvent(event)}
+                    className="block w-full rounded border-l-4 border-indigo-400 bg-indigo-100 px-1.5 py-1 text-left text-xs font-medium text-indigo-900 hover:brightness-95 focus:ring-2 focus:ring-indigo-400 focus:outline-none"
+                    title={`${event.summary}, весь день`}
+                  >
+                    <span className="block truncate">{event.summary}</span>
+                  </button>
+                ))}
               </div>
+            ))}
+          </div>
+        )}
+
+        {/* Grid body */}
+        <div className="flex" style={{ height: `${hourCount * 60}px` }}>
+          {/* Time labels */}
+          <div className="relative w-14 flex-shrink-0 border-r border-slate-200">
+            {hours.map((h) => (
+              <span
+                key={h}
+                className="absolute right-2 text-xs text-slate-400 select-none"
+                style={{ top: `${((h - range.start) / hourCount) * 100}%`, transform: h === range.end ? 'translateY(-100%)' : undefined }}
+              >
+                {String(h).padStart(2, '0')}:00
+              </span>
             ))}
           </div>
 
           {/* Day columns */}
           {days.map((day, colIdx) => {
             const today = isToday(day);
-            const dayEvents = events.filter((ev) => isSameCalendarDay(day, ev.start));
-            const positioned = layoutDayEvents(dayEvents);
+            const positioned = layoutDayEvents(events, dateKeys[colIdx], range);
 
             return (
               <div
                 key={colIdx}
-                className={`relative flex-1 border-r border-slate-200 last:border-r-0 ${today ? 'bg-indigo-50/30' : ''}`}
-                style={{ minHeight: `${HOURS.length * 52}px` }}
+                className={`relative min-w-0 flex-1 border-r border-slate-200 last:border-r-0 ${today ? 'bg-indigo-50/30' : ''}`}
               >
                 {/* Hour grid lines */}
-                {HOURS.map((h) => (
+                {hours.map((h) => (
                   <div
                     key={h}
-                    className="absolute left-0 right-0 border-b border-slate-100"
+                    className="pointer-events-none absolute left-0 right-0 border-t border-slate-100"
                     style={{
-                      top: `${((h - HOUR_START) / HOURS.length) * 100}%`,
-                      height: `${100 / HOURS.length}%`,
+                      top: `${((h - range.start) / hourCount) * 100}%`,
                     }}
                   />
                 ))}
 
                 {/* Events */}
-                {positioned.map(({ event, topPct, heightPct, colorClass, column, totalColumns }) => {
+                {positioned.map(({ event, topPct, heightPct, colorIndex, column, totalColumns }) => {
                   const widthPct = 100 / totalColumns;
                   const leftPct = column * widthPct;
+                  const label = `${event.summary}, ${formatEventTime(event.start.date_time)}–${formatEventTime(event.end.date_time)}`;
                   return (
                     <button
-                      key={`${event.event_id}-${event.recurrence_id}`}
+                      key={`${event.event_id}-${event.recurrence_id ?? event.start.date_time}`}
+                      type="button"
                       onClick={() => setSelectedEvent(event)}
-                      className={`absolute rounded-md border-l-4 px-1.5 py-1 overflow-hidden cursor-pointer text-left transition hover:brightness-95 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-1 ${colorClass}`}
+                      aria-label={label}
+                      title={label}
+                      className={`absolute overflow-hidden rounded-md border-l-4 px-1.5 py-0.5 text-left transition hover:brightness-95 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-indigo-400 focus:ring-offset-1 ${EVENT_COLORS[colorIndex % EVENT_COLORS.length]}`}
                       style={{
                         top: `${topPct}%`,
                         height: `${heightPct}%`,
-                        left: `${leftPct + 1}%`,
-                        width: `${widthPct - 2}%`,
-                        minHeight: '22px',
+                        left: `${leftPct}%`,
+                        width: `calc(${widthPct}% - 2px)`,
                       }}
                     >
                       <div className="text-xs font-semibold leading-tight truncate">
                         {event.summary}
                       </div>
-                      {heightPct > 3 && (
+                      {heightPct * hourCount * 0.6 >= 36 && (
                         <div className="text-xs opacity-75 leading-tight truncate">
-                        {isAllDayEvent(event) ? 'Весь день' : `${formatEventTime(event.start.date_time)}–${formatEventTime(event.end.date_time)}`}
+                          {formatEventTime(event.start.date_time)}–{formatEventTime(event.end.date_time)}
                         </div>
                       )}
-                      {heightPct > 6 && event.location && (
+                      {heightPct * hourCount * 0.6 >= 52 && event.location && (
                         <div className="text-xs opacity-60 leading-tight truncate">
                           {event.location}
                         </div>
@@ -508,9 +464,10 @@ export default function WeekCalendar({ events, weekStart, email }: WeekCalendarP
             );
           })}
         </div>
+        </div>
       </div>
 
-      {selectedEvent && <EventModal event={selectedEvent} email={email} onClose={closeModal} />}
+      {selectedEvent && <EventModal key={`${email}:${selectedEvent.event_id}:${selectedEvent.recurrence_id ?? ''}`} event={selectedEvent} email={email} onClose={closeModal} />}
     </>
   );
 }

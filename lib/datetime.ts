@@ -2,6 +2,11 @@ import type { EventDateTime } from './types';
 
 export const DISPLAY_TIME_ZONE = 'Europe/Moscow';
 const MOSCOW_OFFSET = '+03:00';
+const displayFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: DISPLAY_TIME_ZONE,
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
 
 export function formatDateOnly(date: Date): string {
   const year = date.getFullYear();
@@ -16,9 +21,9 @@ export function toMoscowDateTime(dateStr: string, time = '00:00:00'): string {
 }
 
 export function addDaysToDateStr(dateStr: string, days: number): string {
-  const date = new Date(`${dateStr}T00:00:00`);
-  date.setDate(date.getDate() + days);
-  return formatDateOnly(date);
+  const date = new Date(`${dateStr}T00:00:00Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
 }
 
 /**
@@ -31,18 +36,27 @@ export function normalizeRecurrenceId(recurrenceId: string): string {
 }
 
 export function getEventDateKey(start: EventDateTime): string | null {
-  if (start.date_time) return start.date_time.split('T')[0];
+  if (start.date_time) return getDisplayDateTime(start.date_time)?.dateKey ?? null;
   if (start.date) return start.date;
   return null;
 }
 
+/** Offset-free Calendar API values use the requested Europe/Moscow timezone. */
+function getDisplayDateTime(dateTime: string): { dateKey: string; minutes: number } | null {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(dateTime)) return null;
+  const hasOffset = /(?:Z|[+-]\d{2}:\d{2})$/i.test(dateTime);
+  const instant = new Date(hasOffset ? dateTime : `${dateTime}${MOSCOW_OFFSET}`);
+  if (!Number.isFinite(instant.getTime())) return null;
+  const parts = Object.fromEntries(displayFormatter.formatToParts(instant).map(({ type, value }) => [type, value]));
+  return {
+    dateKey: `${parts.year}-${parts.month}-${parts.day}`,
+    minutes: Number(parts.hour) * 60 + Number(parts.minute),
+  };
+}
+
 export function getEventTimeMinutes(dateTime?: string): number | null {
   if (!dateTime) return null;
-  const timePart = dateTime.split('T')[1];
-  if (!timePart) return null;
-  const [h, m] = timePart.split(/[Z+-]/)[0].split(':').map(Number);
-  if (Number.isNaN(h) || Number.isNaN(m)) return null;
-  return h * 60 + m;
+  return getDisplayDateTime(dateTime)?.minutes ?? null;
 }
 
 export function formatEventTime(dateTime?: string): string {
